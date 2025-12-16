@@ -14,76 +14,126 @@ import { fetchRecentPhotos } from '../services/flickrService';
 import { cacheImages, getCachedImages, hasResponseChanged } from '../services/cacheService';
 import ImageCard from '../components/ImageCard';
 
-const HomeScreen = () => {
+const HomeScreen = ({ navigation }) => {
     const [photos, setPhotos] = useState([]);
     const [loading, setLoading] = useState(true);
+    const [loadingMore, setLoadingMore] = useState(false);
     const [refreshing, setRefreshing] = useState(false);
     const [error, setError] = useState(null);
     const [isOffline, setIsOffline] = useState(false);
     const [menuVisible, setMenuVisible] = useState(false);
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalPages, setTotalPages] = useState(1);
+    const [showRetrySnackbar, setShowRetrySnackbar] = useState(false);
 
     // Load photos on mount
     useEffect(() => {
         loadPhotos();
     }, []);
 
-    const loadPhotos = async () => {
+    const loadPhotos = async (page = 1) => {
         try {
-            setError(null);
+            if (page === 1) {
+                setError(null);
+            } else {
+                setLoadingMore(true);
+            }
 
-            // First, try to load from cache
-            const cachedPhotos = await getCachedImages();
-            if (cachedPhotos && cachedPhotos.length > 0) {
-                setPhotos(cachedPhotos);
-                setLoading(false);
+            // First, try to load from cache (only for page 1)
+            if (page === 1) {
+                const cachedPhotos = await getCachedImages();
+                if (cachedPhotos && cachedPhotos.length > 0) {
+                    setPhotos(cachedPhotos);
+                    setLoading(false);
+                }
             }
 
             // Then try to fetch from API
             try {
-                const freshPhotos = await fetchRecentPhotos();
+                const result = await fetchRecentPhotos(page);
 
-                // Check if response has changed
-                const changed = await hasResponseChanged(freshPhotos);
+                // For page 1, check if response has changed
+                if (page === 1) {
+                    const changed = await hasResponseChanged(result.photos);
 
-                if (changed) {
-                    // Update UI with fresh data
-                    setPhotos(freshPhotos);
-                    // Cache the new data
-                    await cacheImages(freshPhotos);
-                    console.log('Fresh data loaded and cached');
+                    if (changed) {
+                        // Update UI with fresh data
+                        setPhotos(result.photos);
+                        // Cache the new data
+                        await cacheImages(result.photos);
+                        console.log('Fresh data loaded and cached');
+                    } else {
+                        console.log('Using cached data (no changes detected)');
+                    }
                 } else {
-                    console.log('Using cached data (no changes detected)');
+                    // For pagination, append to existing photos
+                    setPhotos(prev => [...prev, ...result.photos]);
                 }
 
+                setCurrentPage(result.page);
+                setTotalPages(result.pages);
                 setIsOffline(false);
+                setShowRetrySnackbar(false);
             } catch (apiError) {
                 console.log('API Error:', apiError.message);
-                // If API fails but we have cache, use cache
-                if (cachedPhotos && cachedPhotos.length > 0) {
-                    console.log('API failed, using cached data');
-                    setIsOffline(true);
+                
+                if (page === 1) {
+                    // If API fails on page 1 and we have cache, use cache
+                    const cachedPhotos = await getCachedImages();
+                    if (cachedPhotos && cachedPhotos.length > 0) {
+                        console.log('API failed, using cached data');
+                        setIsOffline(true);
+                    } else {
+                        // No cache and API failed - show friendly error
+                        setError('No internet connection. Please connect to the internet to load photos for the first time.');
+                        setIsOffline(true);
+                        setShowRetrySnackbar(true);
+                    }
                 } else {
-                    // No cache and API failed - show friendly error
-                    setError('No internet connection. Please connect to the internet to load photos for the first time.');
-                    setIsOffline(true);
+                    // Pagination failed
+                    setShowRetrySnackbar(true);
                 }
             }
         } catch (err) {
             console.error('Error loading photos:', err);
             setError('Failed to load photos. Please check your connection and try again.');
+            setShowRetrySnackbar(true);
         } finally {
             setLoading(false);
             setRefreshing(false);
+            setLoadingMore(false);
+        }
+    };
+
+    const loadMorePhotos = () => {
+        if (!loadingMore && !loading && currentPage < totalPages) {
+            loadPhotos(currentPage + 1);
+        }
+    };
+
+    const handleRetry = () => {
+        setShowRetrySnackbar(false);
+        if (photos.length === 0) {
+            setLoading(true);
+            loadPhotos(1);
+        } else {
+            loadPhotos(currentPage + 1);
         }
     };
 
     const onRefresh = useCallback(() => {
         setRefreshing(true);
-        loadPhotos();
+        setCurrentPage(1);
+        loadPhotos(1);
     }, []);
 
     const toggleMenu = () => {
         setMenuVisible(!menuVisible);
+    };
+
+    const navigateToSearch = () => {
+        setMenuVisible(false);
+        navigation.navigate('Search');
     };
 
     const renderItem = ({ item }) => <ImageCard photo={item} />;
@@ -97,7 +147,12 @@ const HomeScreen = () => {
                 <Ionicons name="menu" size={28} color="#333" />
             </TouchableOpacity>
             <Text style={styles.headerTitle}>Recent Photos</Text>
-            <View style={styles.placeholder} />
+            <TouchableOpacity
+                style={styles.searchButton}
+                onPress={navigateToSearch}
+            >
+                <Ionicons name="search" size={24} color="#333" />
+            </TouchableOpacity>
         </View>
     );
 
@@ -108,6 +163,33 @@ const HomeScreen = () => {
             <View style={styles.offlineBanner}>
                 <Ionicons name="cloud-offline" size={16} color="#fff" />
                 <Text style={styles.offlineText}>Offline - Showing cached photos</Text>
+            </View>
+        );
+    };
+
+    const renderFooter = () => {
+        if (!loadingMore) return null;
+        
+        return (
+            <View style={styles.footerLoader}>
+                <ActivityIndicator size="large" color="#667eea" />
+                <Text style={styles.footerText}>Loading more...</Text>
+            </View>
+        );
+    };
+
+    const renderRetrySnackbar = () => {
+        if (!showRetrySnackbar) return null;
+
+        return (
+            <View style={styles.snackbar}>
+                <View style={styles.snackbarContent}>
+                    <Ionicons name="alert-circle" size={20} color="#fff" />
+                    <Text style={styles.snackbarText}>Network Error</Text>
+                </View>
+                <TouchableOpacity onPress={handleRetry} style={styles.retrySnackbarButton}>
+                    <Text style={styles.retrySnackbarText}>RETRY</Text>
+                </TouchableOpacity>
             </View>
         );
     };
@@ -138,6 +220,14 @@ const HomeScreen = () => {
                             <Ionicons name="home" size={24} color="#667eea" />
                             <Text style={styles.menuItemText}>Home</Text>
                         </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={styles.menuItem}
+                            onPress={navigateToSearch}
+                        >
+                            <Ionicons name="search" size={24} color="#667eea" />
+                            <Text style={styles.menuItemText}>Search</Text>
+                        </TouchableOpacity>
                     </View>
 
                     <View style={styles.menuFooter}>
@@ -164,7 +254,7 @@ const HomeScreen = () => {
                 {renderHeader()}
                 <Ionicons name="alert-circle" size={64} color="#ff6b6b" />
                 <Text style={styles.errorText}>{error}</Text>
-                <TouchableOpacity style={styles.retryButton} onPress={loadPhotos}>
+                <TouchableOpacity style={styles.retryButton} onPress={() => loadPhotos(1)}>
                     <Text style={styles.retryButtonText}>Retry</Text>
                 </TouchableOpacity>
             </View>
@@ -183,6 +273,9 @@ const HomeScreen = () => {
                 numColumns={2}
                 contentContainerStyle={styles.listContent}
                 columnWrapperStyle={styles.row}
+                ListFooterComponent={renderFooter}
+                onEndReached={loadMorePhotos}
+                onEndReachedThreshold={0.5}
                 refreshControl={
                     <RefreshControl
                         refreshing={refreshing}
@@ -192,6 +285,7 @@ const HomeScreen = () => {
                     />
                 }
             />
+            {renderRetrySnackbar()}
         </View>
     );
 };
@@ -226,8 +320,8 @@ const styles = StyleSheet.create({
         fontWeight: 'bold',
         color: '#333',
     },
-    placeholder: {
-        width: 44,
+    searchButton: {
+        padding: 8,
     },
     offlineBanner: {
         backgroundColor: '#ff9800',
@@ -323,6 +417,52 @@ const styles = StyleSheet.create({
         fontSize: 12,
         color: '#666',
         textAlign: 'center',
+    },
+    footerLoader: {
+        paddingVertical: 20,
+        alignItems: 'center',
+    },
+    footerText: {
+        marginTop: 8,
+        fontSize: 14,
+        color: '#666',
+    },
+    snackbar: {
+        position: 'absolute',
+        bottom: 20,
+        left: 16,
+        right: 16,
+        backgroundColor: '#323232',
+        borderRadius: 4,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingVertical: 14,
+        paddingHorizontal: 16,
+        elevation: 6,
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.25,
+        shadowRadius: 4,
+    },
+    snackbarContent: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+    },
+    snackbarText: {
+        color: '#fff',
+        fontSize: 14,
+        marginLeft: 12,
+    },
+    retrySnackbarButton: {
+        paddingHorizontal: 8,
+        paddingVertical: 4,
+    },
+    retrySnackbarText: {
+        color: '#4CAF50',
+        fontSize: 14,
+        fontWeight: 'bold',
     },
 });
 
